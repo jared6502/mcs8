@@ -5,12 +5,37 @@
 #include <stdint.h>
 #include <stdio.h>
 
+//declarations
+void SetRegVal(int, uint8_t);
+uint8_t GetRegVal(int);
+void WriteMem(int, uint8_t);
+uint8_t ReadMem(int);
+
+FILE* tracefile;
+
 static SDL_Window* window = NULL;
 static SDL_Renderer* renderer = NULL;
 
-bool extended_mem = false;
-bool extended_stack = false;
+bool has_extended_mem = false;
+bool has_extended_stack = false;
 bool timer_int = false;
+
+bool datapoint2200 = false;
+
+bool has_uart = true;
+bool has_another_uart = false;
+bool has_papertape = true;
+bool has_mark8_tvt = false;
+bool has_numberpanel = false;
+bool has_dg_tvt = false;
+bool has_datapoint_crt = false;
+bool has_bitbanged_serial = false;
+bool has_cassette = false;
+bool has_lpt = false;
+bool has_extended_bus = false;
+bool inverted_io = true;
+bool relative_pc = false;
+bool bank_switching = false;
 
 bool cpudebug = false;
 bool iodebug = false;
@@ -19,11 +44,28 @@ uint8_t mem[65536];
 uint8_t p_input[8];
 uint8_t p_output[24];
 uint16_t stack[16];
-uint8_t r_a, r_b, r_c, r_d, r_e, r_h, r_l, r_sp;
+uint16_t pc;
+//uint8_t r_a, r_b, r_c, r_d, r_e, r_h, r_l, r_sp;
+//uint8_t r_a_beta, r_b_beta, r_c_beta, r_d_beta, r_e_beta, r_h_beta, r_l_beta;
+uint8_t r_sp;
+uint8_t regs[16];
 bool f_carry, f_zero, f_sign, f_parity, f_halt;
+bool f_beta_regs;
+bool f_int_enable;
 
 int rom_start = 0x3800;
 int rom_end = 0x3FFF;
+
+#define REG_ALPHA 0
+#define REG_A 0
+#define REG_B 1
+#define REG_C 2
+#define REG_D 3
+#define REG_E 4
+#define REG_H 5
+#define REG_L 6
+#define REG_M 7
+#define REG_BETA 8
 
 void ram_init()
 {
@@ -48,8 +90,10 @@ void ram_init()
 void ResetCpu()
 {
 	r_sp = 0;
-	stack[r_sp] = rom_start; //Intellec 8/Mod 8 ROM start
+	pc = rom_start; //stack[r_sp] = rom_start; //Intellec 8/Mod 8 ROM start
 	f_carry = f_zero = f_sign = f_parity = false;
+	f_beta_regs = false;
+	f_int_enable = true;
 	f_halt = false;
 
 	ram_init();
@@ -441,57 +485,73 @@ void GetNextKey()
 	}
 }
 
+uint8_t add_on_stack[256];
+uint8_t add_on_sp;
+
 void RunIo(int port)
 {
+	uint8_t tmp;
+	//uint8_t outval;
+
+	//outval = GetRegVal(REG_A); //(f_beta_regs ? r_a_beta : r_a);
+
 	switch (port)
 	{
 		//input ports
 
 		//UART - data in (keyboard input)
 		case 0:
-			r_a = ~Uart_Rx;
+			//inval = (inverted_io ? ~Uart_Rx : Uart_Rx);
+			SetRegVal(REG_A, (inverted_io ? ~Uart_Rx : Uart_Rx));
 			Uart_Rx_Rdy = true;
 			break;
 
 		//status - UART, programmer, and tape punch status
 		case 1:
-			r_a =
-				(Uart_Rx_Rdy ? 1 : 0) +
-				(Uart_Tx_Rdy ? 4 : 0)
+			tmp =
+				(Uart_Rx_Rdy ? 0 : 1) +
+				(Uart_Tx_Rdy ? 0 : 4)
 				;
+			SetRegVal(REG_A, inverted_io ? ~tmp : tmp);
 			break;
 
 		//PROM programmer - data in from EPROM
 		case 2:
 			//TODO: read EPROM data from file
-			r_a = 0xFF;
+			//inval = 0xFF;
+			SetRegVal(REG_A, 0xFF);
 			break;
 			
 		//tape punch - data in from tape
 		case 3:
 			//TODO: read tape data from file
-			r_a = 0xFF;
+			//inval = 0xFF;
+			SetRegVal(REG_A, 0xFF);
 			break;
 
 		//data stack - data in (pop)
 		case 4:
-			//TODO: implement 256-level stack
-			r_a = 0xFF;
+			//inval = add_on_stack[add_on_sp];
+			SetRegVal(REG_A, add_on_stack[add_on_sp]);
+			add_on_sp--;
 			break;
 
 		//spare
 		case 5:
-			r_a = 0xFF;
+			//inval = 0xFF;
+			SetRegVal(REG_A, 0xFF);
 			break;
 
 		//spare
 		case 6:
-			r_a = 0xFF;
+			//inval = 0xFF;
+			SetRegVal(REG_A, 0xFF);
 			break;
 
 		//spare
 		case 7:
-			r_a = 0xFF;
+			//inval = 0xFF;
+			SetRegVal(REG_A, 0xFF);
 			break;
 
 		//output ports
@@ -501,13 +561,14 @@ void RunIo(int port)
 			//Uart_Tx = r_a;
 			//Uart_Tx_Rdy = false;
 			//printf("%c", (char)r_a);
-			putchar(~r_a);
+			tmp = GetRegVal(REG_A);
+			putchar(inverted_io ? ~tmp : tmp);
 			Uart_Tx_Rdy = false;
 			break;
 
 		//control - tape punch, PROM programmer
 		case 9:
-			putchar(r_a);
+			putchar(GetRegVal(REG_A));
 			break;
 
 		//PROM programmer - address
@@ -522,7 +583,8 @@ void RunIo(int port)
 
 		//data stack - data output (push)
 		case 12:
-			//TODO: implement 256-level stack
+			add_on_sp++;
+			add_on_stack[add_on_sp] = GetRegVal(REG_A);
 			break;
 
 		case 13:
@@ -586,66 +648,96 @@ void RunIo(int port)
 			break;
 	}
 
-	if (cpudebug || iodebug) printf(port < 8 ? "INP" : "OUTP");
-	if (cpudebug || iodebug) printf(" %i: %02X\r\n", port, r_a);
+	if (cpudebug || iodebug) fprintf(tracefile, port < 8 ? "INP" : "OUTP");
+	if (cpudebug || iodebug) fprintf(tracefile, " %i: %02X\r\n", port, GetRegVal(REG_A));
 }
 
 void LoadPC(int value)
 {
-	stack[r_sp] = value & (extended_mem ? 0xFFFF : 0x3FFF);
+	//stack[r_sp] = value & (extended_mem ? 0xFFFF : 0x3FFF);
+	pc = value & (has_extended_mem ? 0xFFFF : 0x3FFF);
 }
 
 void IncPC()
 {
-	LoadPC(stack[r_sp] + 1);
+	LoadPC(pc + 1); //stack[r_sp] + 1);
 }
 
 void IncSP()
 {
-	r_sp = (r_sp + 1) & (extended_stack ? 0x0F : 0x07);
+	r_sp = (r_sp + 1) & (has_extended_stack ? 0x0F : 0x07);
 }
 
 void DecSP()
 {
-	r_sp = (r_sp - 1) & (extended_stack ? 0x0F : 0x07);
+	r_sp = (r_sp - 1) & (has_extended_stack ? 0x0F : 0x07);
 }
 
 void Jump()
 {
 	uint8_t imm1, imm2;
 	IncPC();
-	imm1 = mem[stack[r_sp]];
+	imm1 = ReadMem(pc); //mem[stack[r_sp]];
 	IncPC();
-	imm2 = mem[stack[r_sp]];
+	imm2 = ReadMem(pc); //mem[stack[r_sp]];
 	LoadPC((imm2 << 8) + imm1);
-	if (cpudebug) printf("%04X", (imm2 << 8) + imm1);
+	if (cpudebug) fprintf(tracefile, "%04X", (imm2 << 8) + imm1);
+}
+
+void Push(uint16_t val)
+{
+	IncSP();
+	stack[r_sp] = val;
+}
+
+uint16_t Pop()
+{
+	uint16_t tmp = stack[r_sp];
+	DecSP();
+	return tmp;
 }
 
 void Call()
 {
 	uint8_t imm1, imm2;
 	IncPC();
-	imm1 = mem[stack[r_sp]];
+	imm1 = ReadMem(pc); //mem[stack[r_sp]];
 	IncPC();
-	imm2 = mem[stack[r_sp]];
+	imm2 = ReadMem(pc); // mem[stack[r_sp]];
 	IncPC();
-	IncSP();
+	//IncSP();
+	Push(pc);
 	LoadPC((imm2 << 8) + imm1);
-	if (cpudebug) printf("%04X", (imm2 << 8) + imm1);
+	if (cpudebug) fprintf(tracefile, "%04X", (imm2 << 8) + imm1);
+}
+
+uint8_t ReadMem(int addr)
+{
+	int filtered_addr = addr & (has_extended_mem ? 0xFFFF : 0x3FFF);
+
+	return mem[filtered_addr];
+}
+
+void WriteMem(int addr, uint8_t val)
+{
+	int filtered_addr = addr & (has_extended_mem ? 0xFFFF : 0x3FFF);
+
+	if (filtered_addr < rom_start || filtered_addr > rom_end)
+	{
+		mem[addr] = val;
+	}
 }
 
 uint8_t GetHL()
 {
-	return mem[((r_h << 8) + r_l) & (extended_mem ? 0xFFFF : 0x3FFF)];
+	int addr = (GetRegVal(REG_H) << 8) + GetRegVal(REG_L);
+	return ReadMem(addr);
 }
 
 void SetHL(uint8_t val)
 {
-	int addr = ((r_h << 8) + r_l) & (extended_mem ? 0xFFFF : 0x3FFF);
-	if (addr < rom_start || addr > rom_end)
-	{
-		mem[addr] = val;
-	}
+	int addr = (GetRegVal(REG_H) << 8) + GetRegVal(REG_L);
+	WriteMem(addr, val);
 }
 
 bool Parity(uint8_t bits)
@@ -667,22 +759,18 @@ uint8_t GetRegVal(int reg)
 {
 	switch (reg)
 	{
-		case 0:
-			return r_a;
-		case 1:
-			return r_b;
-		case 2:
-			return r_c;
-		case 3:
-			return r_d;
-		case 4:
-			return r_e;
-		case 5:
-			return r_h;
-		case 6:
-			return r_l;
-		case 7:
+		case REG_A:
+		case REG_B:
+		case REG_C:
+		case REG_D:
+		case REG_E:
+		case REG_H:
+		case REG_L:
+			return regs[reg + (f_beta_regs ? REG_BETA : REG_ALPHA)];
+
+		case REG_M:
 			return GetHL();
+
 		default:
 			printf("GetRegVal - invalid register source specified.\r\n");
 			return 0;
@@ -693,35 +781,17 @@ void SetRegVal(int reg, uint8_t val)
 {
 	switch (reg)
 	{
-		case 0:
-			r_a = val;
+		case REG_A:
+		case REG_B:
+		case REG_C:
+		case REG_D:
+		case REG_E:
+		case REG_H:
+		case REG_L:
+			regs[reg + (f_beta_regs ? REG_BETA : REG_ALPHA)] = val;
 			break;
 
-		case 1:
-			r_b = val;
-			break;
-
-		case 2:
-			r_c = val;
-			break;
-
-		case 3:
-			r_d = val;
-			break;
-
-		case 4:
-			r_e = val;
-			break;
-
-		case 5:
-			r_h = val;
-			break;
-
-		case 6:
-			r_l = val;
-			break;
-
-		case 7:
+		case REG_M:
 			SetHL(val);
 			break;
 
@@ -767,7 +837,7 @@ void RunCpu()
 	int sreg;
 	int dreg;
 
-	instruction = mem[stack[r_sp]];
+	instruction = ReadMem(pc); //mem[stack[r_sp]];
 
 	sreg = instruction & 0b00000111;
 	dreg = (instruction & 0b00111000) >> 3;
@@ -777,14 +847,20 @@ void RunCpu()
 		return;
 	}
 
+	tracefile = fopen("trace.txt", "a");
+
 	if (Uart_Rx_Rdy)
 	{
 		GetNextKey();
 	}
 
-	if (cpudebug) printf("REGS: A:%02X B:%02X C:%02X D:%02X E:%02X H:%02X L:%02X M:%02X\r\n", r_a, r_b, r_c, r_d, r_e, r_h, r_l, mem[(r_h << 8) + r_l]);
-	if (cpudebug) printf("FLAG: C:%c Z:%c S:%c P:%c\r\n", f_carry ? 'T' : 'F', f_zero ? 'T' : 'F', f_sign ? 'T' : 'F', f_parity ? 'T' : 'F');
-	if (cpudebug) printf("INST: %04X ", stack[r_sp]);
+	if (cpudebug && datapoint2200) fprintf(tracefile, "A");
+	if (cpudebug) fprintf(tracefile, "REGS: A:%02X B:%02X C:%02X D:%02X E:%02X H:%02X L:%02X M:%02X\r\n", regs[0], regs[1], regs[2], regs[3], regs[4], regs[5], regs[6], mem[(regs[5] << 8) + regs[6]]);
+	if (cpudebug && datapoint2200) fprintf(tracefile, "BREGS: A:%02X B:%02X C:%02X D:%02X E:%02X H:%02X L:%02X M:%02X\r\n", regs[8], regs[9], regs[10], regs[11], regs[12], regs[13], regs[14], mem[(regs[13] << 8) + regs[14]]);
+	if (cpudebug) fprintf(tracefile, "FLAG: C:%c Z:%c S:%c P:%c", f_carry ? 'T' : 'F', f_zero ? 'T' : 'F', f_sign ? 'T' : 'F', f_parity ? 'T' : 'F');
+	if (cpudebug && datapoint2200) fprintf(tracefile, " A:%c B:%c", f_beta_regs ? 'F' : 'T', f_beta_regs ? 'T' : 'F');
+	if (cpudebug) fprintf(tracefile, "\r\n");
+	if (cpudebug) fprintf(tracefile, "INST: %04X ", pc); //stack[r_sp]);
 
 	switch (instruction)
 	{
@@ -854,7 +930,7 @@ void RunCpu()
 		case 0b11111110:
 			SetRegVal(dreg, GetRegVal(sreg));
 			IncPC();
-			if (cpudebug) printf("L%c%c", regletter(dreg), regletter(sreg));
+			if (cpudebug) fprintf(tracefile, "L%c%c", regletter(dreg), regletter(sreg));
 			break;
 
 		//LrI/LMI
@@ -867,27 +943,159 @@ void RunCpu()
 		case 0b00110110:
 		case 0b00111110:
 			IncPC();
-			imm = mem[stack[r_sp]];
+			imm = ReadMem(pc); //mem[stack[r_sp]];
 			SetRegVal(dreg, imm);
 			IncPC();
-			if (cpudebug) printf("L%cI %02X", regletter(dreg), imm);
+			if (cpudebug) fprintf(tracefile, "L%cI %02X", regletter(dreg), imm);
 			break;
 
 		//INr
 		case 0b00001000:
+			if (datapoint2200)
+			{
+				//Datapoint 2200 - ? - treat as NOP
+				if (cpudebug) fprintf(tracefile, "UNKNOWN");
+				IncPC();
+			}
+			else
+			{
+				//Intel 8008 - INB
+				tmp_acc = GetRegVal(dreg) + 1;
+				f_sign = tmp_acc & 0x80;
+				f_zero = (tmp_acc & 0xFF) == 0x00;
+				f_parity = Parity(tmp_acc & 0xFF);
+				SetRegVal(dreg, tmp_acc & 0xFF);
+				IncPC();
+				if (cpudebug) fprintf(tracefile, "IN%c", regletter(dreg));
+			}
+			break;
+
 		case 0b00010000:
+			if (datapoint2200)
+			{
+				//Datapoint 2200 - set BETA flag
+				f_beta_regs = true;
+				IncPC();
+				if (cpudebug) fprintf(tracefile, "BETA");
+			}
+			else
+			{
+				//Intel 8008 - INC
+				tmp_acc = GetRegVal(dreg) + 1;
+				f_sign = tmp_acc & 0x80;
+				f_zero = (tmp_acc & 0xFF) == 0x00;
+				f_parity = Parity(tmp_acc & 0xFF);
+				SetRegVal(dreg, tmp_acc & 0xFF);
+				IncPC();
+				if (cpudebug) fprintf(tracefile, "IN%c", regletter(dreg));
+			}
+			break;
+
 		case 0b00011000:
+			if (datapoint2200)
+			{
+				//Datapoint 2200 - set ALPHA flag
+				f_beta_regs = false;
+				if (cpudebug) fprintf(tracefile, "ALPHA");
+				IncPC();
+			}
+			else
+			{
+				//Intel 8008 - IND
+				tmp_acc = GetRegVal(dreg) + 1;
+				f_sign = tmp_acc & 0x80;
+				f_zero = (tmp_acc & 0xFF) == 0x00;
+				f_parity = Parity(tmp_acc & 0xFF);
+				SetRegVal(dreg, tmp_acc & 0xFF);
+				IncPC();
+				if (cpudebug) fprintf(tracefile, "IN%c", regletter(dreg));
+			}
+			break;
+
 		case 0b00100000:
+			if (datapoint2200)
+			{
+				//Datapoint 2200 - DI - disable interrupts
+				f_int_enable = false;
+				IncPC();
+				if (cpudebug) fprintf(tracefile, "DI");
+			}
+			else
+			{
+				//Intel 8008 - INE
+				tmp_acc = GetRegVal(dreg) + 1;
+				f_sign = tmp_acc & 0x80;
+				f_zero = (tmp_acc & 0xFF) == 0x00;
+				f_parity = Parity(tmp_acc & 0xFF);
+				SetRegVal(dreg, tmp_acc & 0xFF);
+				IncPC();
+				if (cpudebug) fprintf(tracefile, "IN%c", regletter(dreg));
+			}
+			break;
+
 		case 0b00101000:
+			if (datapoint2200)
+			{
+				//Datapoint 2200 - EI - enable interrupts
+				f_int_enable = true;
+				IncPC();
+				if (cpudebug) fprintf(tracefile, "EI");
+			}
+			else
+			{
+				//Intel 8008 - INH
+				tmp_acc = GetRegVal(dreg) + 1;
+				f_sign = tmp_acc & 0x80;
+				f_zero = (tmp_acc & 0xFF) == 0x00;
+				f_parity = Parity(tmp_acc & 0xFF);
+				SetRegVal(dreg, tmp_acc & 0xFF);
+				IncPC();
+				if (cpudebug) fprintf(tracefile, "IN%c", regletter(dreg));
+			}
+			break;
+
 		case 0b00110000:
+			if (datapoint2200)
+			{
+				//Datapoint 2200 - POP - pop HL from internal stack
+				tmp_acc = Pop();
+				SetRegVal(REG_H, (tmp_acc >> 8) & 0xFF);
+				SetRegVal(REG_L, tmp_acc & 0xFF);
+				IncPC();
+				if (cpudebug) fprintf(tracefile, "POP");
+			}
+			else
+			{
+				//Intel 8008 - INL
+				tmp_acc = GetRegVal(dreg) + 1;
+				f_sign = tmp_acc & 0x80;
+				f_zero = (tmp_acc & 0xFF) == 0x00;
+				f_parity = Parity(tmp_acc & 0xFF);
+				SetRegVal(dreg, tmp_acc & 0xFF);
+				IncPC();
+				if (cpudebug) fprintf(tracefile, "IN%c", regletter(dreg));
+			}
+			break;
+
 		case 0b00111000:
-			tmp_acc = GetRegVal(dreg) + 1;
-			f_sign = tmp_acc & 0x80;
-			f_zero = (tmp_acc & 0xFF) == 0x00;
-			f_parity = Parity(tmp_acc & 0xFF);
-			SetRegVal(dreg, tmp_acc & 0xFF);
-			IncPC();
-			if (cpudebug) printf("IN%c", regletter(dreg));
+			if (datapoint2200)
+			{
+				//Datapoint 2200 - PUSH - push HL to internal stack
+				Push((GetRegVal(REG_H) << 8) + GetRegVal(REG_L));
+				IncPC();
+				if (cpudebug) fprintf(tracefile, "PUSH");
+			}
+			else
+			{
+				//Intel 8008 - INM
+				tmp_acc = GetRegVal(dreg) + 1;
+				f_sign = tmp_acc & 0x80;
+				f_zero = (tmp_acc & 0xFF) == 0x00;
+				f_parity = Parity(tmp_acc & 0xFF);
+				SetRegVal(dreg, tmp_acc & 0xFF);
+				IncPC();
+				if (cpudebug) fprintf(tracefile, "IN%c", regletter(dreg));
+			}
 			break;
 		
 		//DCr
@@ -904,7 +1112,7 @@ void RunCpu()
 			f_parity = Parity(tmp_acc & 0xFF);
 			SetRegVal(dreg, tmp_acc & 0xFF);
 			IncPC();
-			if (cpudebug) printf("DC%c", regletter(dreg));
+			if (cpudebug) fprintf(tracefile, "DC%c", regletter(dreg));
 			break;
 
 		//ADr/ADM
@@ -916,28 +1124,29 @@ void RunCpu()
 		case 0b10000101:
 		case 0b10000110:
 		case 0b10000111:
-			tmp_acc = r_a + GetRegVal(sreg);
+			tmp_acc = GetRegVal(REG_A) + GetRegVal(sreg);
 			f_carry = tmp_acc > 0xFF;
 			f_sign = tmp_acc & 0x80;
 			f_zero = (tmp_acc & 0xFF) == 0x00;
 			f_parity = Parity(tmp_acc & 0xFF);
-			r_a = tmp_acc & 0xFF;
+			SetRegVal(REG_A, tmp_acc & 0xFF);
+			
 			IncPC();
-			if (cpudebug) printf("AD%c", regletter(sreg));
+			if (cpudebug) fprintf(tracefile, "AD%c", regletter(sreg));
 			break;
 
 			//ADI
 		case 0b00000100:
 			IncPC();
-			imm = mem[stack[r_sp]];
-			tmp_acc = r_a + imm;
+			imm = ReadMem(pc); //mem[stack[r_sp]];
+			tmp_acc = GetRegVal(REG_A) + imm;
 			f_carry = tmp_acc > 0xFF;
 			f_sign = tmp_acc & 0x80;
 			f_zero = (tmp_acc & 0xFF) == 0x00;
 			f_parity = Parity(tmp_acc & 0xFF);
-			r_a = tmp_acc & 0xFF;
+			SetRegVal(REG_A, tmp_acc & 0xFF);
 			IncPC();
-			if (cpudebug) printf("ADI %02X", imm);
+			if (cpudebug) fprintf(tracefile, "ADI %02X", imm);
 			break;
 
 		//ACr/ACM
@@ -949,28 +1158,28 @@ void RunCpu()
 		case 0b10001101:
 		case 0b10001110:
 		case 0b10001111:
-			tmp_acc = (r_a + GetRegVal(sreg)) + (f_carry ? 1 : 0);
+			tmp_acc = (GetRegVal(REG_A) + GetRegVal(sreg)) + (f_carry ? 1 : 0);
 			f_carry = tmp_acc > 0xFF;
 			f_sign = tmp_acc & 0x80;
 			f_zero = (tmp_acc & 0xFF) == 0x00;
 			f_parity = Parity(tmp_acc & 0xFF);
-			r_a = tmp_acc & 0xFF;
+			SetRegVal(REG_A, tmp_acc & 0xFF);
 			IncPC();
-			if (cpudebug) printf("AC%c", regletter(sreg));
+			if (cpudebug) fprintf(tracefile, "AC%c", regletter(sreg));
 			break;
 
 			//ACI
 		case 0b00001100:
 			IncPC();
-			imm = mem[stack[r_sp]];
-			tmp_acc = (r_a + imm) + (f_carry ? 1 : 0);
+			imm = ReadMem(pc); //mem[stack[r_sp]];
+			tmp_acc = (GetRegVal(REG_A) + imm) + (f_carry ? 1 : 0);
 			f_carry = tmp_acc > 0xFF;
 			f_sign = tmp_acc & 0x80;
 			f_zero = (tmp_acc & 0xFF) == 0x00;
 			f_parity = Parity(tmp_acc & 0xFF);
-			r_a = tmp_acc & 0xFF;
+			SetRegVal(REG_A, tmp_acc & 0xFF);
 			IncPC();
-			if (cpudebug) printf("ACI %02X", imm);
+			if (cpudebug) fprintf(tracefile, "ACI %02X", imm);
 			break;
 
 		//SUr/SUM
@@ -982,28 +1191,28 @@ void RunCpu()
 		case 0b10010101:
 		case 0b10010110:
 		case 0b10010111:
-			tmp_acc = r_a - GetRegVal(sreg);
+			tmp_acc = GetRegVal(REG_A) - GetRegVal(sreg);
 			f_carry = tmp_acc > 0xFF;
 			f_sign = tmp_acc & 0x80;
 			f_zero = (tmp_acc & 0xFF) == 0x00;
 			f_parity = Parity(tmp_acc & 0xFF);
-			r_a = tmp_acc & 0xFF;
+			SetRegVal(REG_A, tmp_acc & 0xFF);
 			IncPC();
-			if (cpudebug) printf("SU%c", regletter(sreg));
+			if (cpudebug) fprintf(tracefile, "SU%c", regletter(sreg));
 			break;
 
 			//SUI
 		case 0b00010100:
 			IncPC();
-			imm = mem[stack[r_sp]];
-			tmp_acc = r_a - imm;
+			imm = ReadMem(pc); //mem[stack[r_sp]];
+			tmp_acc = GetRegVal(REG_A) - imm;
 			f_carry = tmp_acc > 0xFF;
 			f_sign = tmp_acc & 0x80;
 			f_zero = (tmp_acc & 0xFF) == 0x00;
 			f_parity = Parity(tmp_acc & 0xFF);
-			r_a = tmp_acc & 0xFF;
+			SetRegVal(REG_A, tmp_acc & 0xFF);
 			IncPC();
-			if (cpudebug) printf("SUI %02X", imm);
+			if (cpudebug) fprintf(tracefile, "SUI %02X", imm);
 			break;
 
 		//SBr/SBM
@@ -1015,28 +1224,28 @@ void RunCpu()
 		case 0b10011101:
 		case 0b10011110:
 		case 0b10011111:
-			tmp_acc = (r_a - GetRegVal(sreg)) - (f_carry ? 1 : 0);
+			tmp_acc = (GetRegVal(REG_A) - GetRegVal(sreg)) - (f_carry ? 1 : 0);
 			f_carry = tmp_acc > 0xFF;
 			f_sign = tmp_acc & 0x80;
 			f_zero = (tmp_acc & 0xFF) == 0x00;
 			f_parity = Parity(tmp_acc & 0xFF);
-			r_a = tmp_acc & 0xFF;
+			SetRegVal(REG_A, tmp_acc & 0xFF);
 			IncPC();
-			if (cpudebug) printf("SB%c", regletter(sreg));
+			if (cpudebug) fprintf(tracefile, "SB%c", regletter(sreg));
 			break;
 
 			//SBI
 		case 0b00011100:
 			IncPC();
-			imm = mem[stack[r_sp]];
-			tmp_acc = (r_a - imm) - (f_carry ? 1 : 0);
+			imm = ReadMem(pc); //mem[stack[r_sp]];
+			tmp_acc = (GetRegVal(REG_A) - imm) - (f_carry ? 1 : 0);
 			f_carry = tmp_acc > 0xFF;
 			f_sign = tmp_acc & 0x80;
 			f_zero = (tmp_acc & 0xFF) == 0x00;
 			f_parity = Parity(tmp_acc & 0xFF);
-			r_a = tmp_acc & 0xFF;
+			SetRegVal(REG_A, tmp_acc & 0xFF);
 			IncPC();
-			if (cpudebug) printf("SBI %02X", imm);
+			if (cpudebug) fprintf(tracefile, "SBI %02X", imm);
 			break;
 
 		//NDr/NDM
@@ -1048,26 +1257,28 @@ void RunCpu()
 		case 0b10100101:
 		case 0b10100110:
 		case 0b10100111:
-			r_a &= GetRegVal(sreg);
+			tmp_acc = (GetRegVal(REG_A) & GetRegVal(sreg)) & 0xFF;
 			f_carry = false;
-			f_sign = r_a & 0x80;
-			f_zero = (r_a == 0x00);
-			f_parity = Parity(r_a);
+			f_sign = tmp_acc & 0x80;
+			f_zero = (tmp_acc == 0x00);
+			f_parity = Parity(tmp_acc);
+			SetRegVal(REG_A, tmp_acc);
 			IncPC();
-			if (cpudebug) printf("ND%c", regletter(sreg));
+			if (cpudebug) fprintf(tracefile, "ND%c", regletter(sreg));
 			break;
 
 			//NDI
 		case 0b00100100:
 			IncPC();
-			imm = mem[stack[r_sp]];
-			r_a &= imm;
+			imm = ReadMem(pc); //mem[stack[r_sp]];
+			tmp_acc = (GetRegVal(REG_A) & imm) & 0xFF;
 			f_carry = false;
-			f_sign = r_a & 0x80;
-			f_zero = (r_a == 0x00);
-			f_parity = Parity(r_a);
+			f_sign = tmp_acc & 0x80;
+			f_zero = (tmp_acc == 0x00);
+			f_parity = Parity(tmp_acc);
+			SetRegVal(REG_A, tmp_acc);
 			IncPC();
-			if (cpudebug) printf("NDI %02X", imm);
+			if (cpudebug) fprintf(tracefile, "NDI %02X", imm);
 			break;
 
 		//XRr/XRM
@@ -1079,26 +1290,28 @@ void RunCpu()
 		case 0b10101101:
 		case 0b10101110:
 		case 0b10101111:
-			r_a ^= GetRegVal(sreg);
+			tmp_acc = (GetRegVal(REG_A) ^ GetRegVal(sreg)) & 0xFF;
 			f_carry = false;
-			f_sign = r_a & 0x80;
-			f_zero = (r_a == 0x00);
-			f_parity = Parity(r_a);
+			f_sign = tmp_acc & 0x80;
+			f_zero = (tmp_acc == 0x00);
+			f_parity = Parity(tmp_acc);
+			SetRegVal(REG_A, tmp_acc);
 			IncPC();
-			if (cpudebug) printf("XR%c", regletter(sreg));
+			if (cpudebug) fprintf(tracefile, "XR%c", regletter(sreg));
 			break;
 
 			//XRI
 		case 0b00101100:
 			IncPC();
-			imm = mem[stack[r_sp]];
-			r_a ^= imm;
+			imm = ReadMem(pc); //mem[stack[r_sp]];
+			tmp_acc = (GetRegVal(REG_A) ^ imm) & 0xFF;
 			f_carry = false;
-			f_sign = r_a & 0x80;
-			f_zero = (r_a == 0x00);
-			f_parity = Parity(r_a);
+			f_sign = tmp_acc & 0x80;
+			f_zero = (tmp_acc == 0x00);
+			f_parity = Parity(tmp_acc);
+			SetRegVal(REG_A, tmp_acc);
 			IncPC();
-			if (cpudebug) printf("XRI %02X", imm);
+			if (cpudebug) fprintf(tracefile, "XRI %02X", imm);
 			break;
 
 		//ORr/ORM
@@ -1110,26 +1323,28 @@ void RunCpu()
 		case 0b10110101:
 		case 0b10110110:
 		case 0b10110111:
-			r_a |= GetRegVal(sreg);
+			tmp_acc = (GetRegVal(REG_A) | GetRegVal(sreg)) & 0xFF;
 			f_carry = false;
-			f_sign = r_a & 0x80;
-			f_zero = (r_a == 0x00);
-			f_parity = Parity(r_a);
+			f_sign = tmp_acc & 0x80;
+			f_zero = (tmp_acc == 0x00);
+			f_parity = Parity(tmp_acc);
+			SetRegVal(REG_A, tmp_acc);
 			IncPC();
-			if (cpudebug) printf("OR%c", regletter(sreg));
+			if (cpudebug) fprintf(tracefile, "OR%c", regletter(sreg));
 			break;
 
 		//ORI
 		case 0b00110100:
 			IncPC();
-			imm = mem[stack[r_sp]];
-			r_a |= imm;
+			imm = ReadMem(pc); //mem[stack[r_sp]];
+			tmp_acc = (GetRegVal(REG_A) | imm) & 0xFF;
 			f_carry = false;
-			f_sign = r_a & 0x80;
-			f_zero = (r_a == 0x00);
-			f_parity = Parity(r_a);
+			f_sign = tmp_acc & 0x80;
+			f_zero = (tmp_acc == 0x00);
+			f_parity = Parity(tmp_acc);
+			SetRegVal(REG_A, tmp_acc);
 			IncPC();
-			if (cpudebug) printf("ORI %02X", imm);
+			if (cpudebug) fprintf(tracefile, "ORI %02X", imm);
 			break;
 
 		//CPr/CPM
@@ -1141,60 +1356,60 @@ void RunCpu()
 		case 0b10111101:
 		case 0b10111110:
 		case 0b10111111:
-			tmp_acc = r_a - GetRegVal(sreg);
+			tmp_acc = GetRegVal(REG_A) - GetRegVal(sreg);
 			f_carry = tmp_acc > 0xFF;
 			f_sign = tmp_acc & 0x80;
 			f_zero = (tmp_acc & 0xFF) == 0x00;
 			f_parity = Parity(tmp_acc & 0xFF);
 			IncPC();
-			if (cpudebug) printf("CP%c", regletter(sreg));
+			if (cpudebug) fprintf(tracefile, "CP%c", regletter(sreg));
 			break;
 
 		//CPI
 		case 0b00111100:
 			IncPC();
-			imm = mem[stack[r_sp]];
-			tmp_acc = r_a - imm;
+			imm = ReadMem(pc); //mem[stack[r_sp]];
+			tmp_acc = GetRegVal(REG_A) - imm;
 			f_carry = tmp_acc > 0xFF;
 			f_sign = tmp_acc & 0x80;
 			f_zero = (tmp_acc & 0xFF) == 0x00;
 			f_parity = Parity(tmp_acc & 0xFF);
 			IncPC();
-			if (cpudebug) printf("CPI %02X", imm);
+			if (cpudebug) fprintf(tracefile, "CPI %02X", imm);
 			break;
 
 		//RLC
 		case 0b00000010:
-			ctmp = (r_a & 0x80);
-			r_a = (r_a << 1) | (ctmp ? 0x01 : 0x00);
+			ctmp = (GetRegVal(REG_A) & 0x80);
+			SetRegVal(REG_A, ((GetRegVal(REG_A) << 1) | (ctmp ? 0x01 : 0x00)) & 0xFF);
 			IncPC();
-			if (cpudebug) printf("RLC");
+			if (cpudebug) fprintf(tracefile, "RLC");
 			break;
 
 		//RRC
 		case 0b00001010:
-			ctmp = (r_a & 0x01);
-			r_a = (r_a >> 1) | (ctmp ? 0x80 : 0x00);
+			ctmp = (GetRegVal(REG_A) & 0x01);
+			SetRegVal(REG_A, ((GetRegVal(REG_A) >> 1) | (ctmp ? 0x80 : 0x00)) & 0xFF);
 			IncPC();
-			if (cpudebug) printf("RRC");
+			if (cpudebug) fprintf(tracefile, "RRC");
 			break;
 
 		//RAL
 		case 0b00010010:
 			ctmp = f_carry;
-			f_carry = (r_a & 0x80);
-			r_a = (r_a << 1) | (ctmp ? 0x01 : 0x00);
+			f_carry = (GetRegVal(REG_A) & 0x80);
+			SetRegVal(REG_A, ((GetRegVal(REG_A) << 1) | (ctmp ? 0x01 : 0x00)) & 0xFF);
 			IncPC();
-			if (cpudebug) printf("RAL");
+			if (cpudebug) fprintf(tracefile, "RAL");
 			break;
 		
 		//RAR
 		case 0b00011010:
 			ctmp = f_carry;
-			f_carry = (r_a & 0x01);
-			r_a = (r_a >> 1) | (ctmp ? 0x80 : 0x00);
+			f_carry = (GetRegVal(REG_A) & 0x01);
+			SetRegVal(REG_A, ((GetRegVal(REG_A) >> 1) | (ctmp ? 0x80 : 0x00)) & 0xFF);
 			IncPC();
-			if (cpudebug) printf("RAR");
+			if (cpudebug) fprintf(tracefile, "RAR");
 			break;
 
 		//JMP
@@ -1206,13 +1421,13 @@ void RunCpu()
 		case 0b01101100:
 		case 0b01110100:
 		case 0b01111100:
-			if (cpudebug) printf("JMP ");
+			if (cpudebug) fprintf(tracefile, "JMP ");
 			Jump();
 			break;
 
 		//JFc
 		case 0b01000000:
-			if (cpudebug) printf("JFC ");
+			if (cpudebug) fprintf(tracefile, "JFC ");
 			if (!f_carry)
 			{
 				Jump();
@@ -1220,15 +1435,15 @@ void RunCpu()
 			else
 			{
 				IncPC();
-				imm = mem[stack[r_sp]];
+				imm = ReadMem(pc); //mem[stack[r_sp]];
 				IncPC();
-				dest = (mem[stack[r_sp]] << 8) + imm;
+				dest = (ReadMem(pc) << 8) + imm; //(mem[stack[r_sp]] << 8) + imm;
 				IncPC();
-				if (cpudebug) printf("%04X", dest);
+				if (cpudebug) fprintf(tracefile, "%04X", dest);
 			}
 			break;
 		case 0b01001000:
-			if (cpudebug) printf("JFZ ");
+			if (cpudebug) fprintf(tracefile, "JFZ ");
 			if (!f_zero)
 			{
 				Jump();
@@ -1236,15 +1451,15 @@ void RunCpu()
 			else
 			{
 				IncPC();
-				imm = mem[stack[r_sp]];
+				imm = ReadMem(pc); //mem[stack[r_sp]];
 				IncPC();
-				dest = (mem[stack[r_sp]] << 8) + imm;
+				dest = (ReadMem(pc) << 8) + imm; //(mem[stack[r_sp]] << 8) + imm;
 				IncPC();
-				if (cpudebug) printf("%04X", dest);
+				if (cpudebug) fprintf(tracefile, "%04X", dest);
 			}
 			break;
 		case 0b01010000:
-			if (cpudebug) printf("JFS ");
+			if (cpudebug) fprintf(tracefile, "JFS ");
 			if (!f_sign)
 			{
 				Jump();
@@ -1252,15 +1467,15 @@ void RunCpu()
 			else
 			{
 				IncPC();
-				imm = mem[stack[r_sp]];
+				imm = ReadMem(pc); //mem[stack[r_sp]];
 				IncPC();
-				dest = (mem[stack[r_sp]] << 8) + imm;
+				dest = (ReadMem(pc) << 8) + imm; //(mem[stack[r_sp]] << 8) + imm;
 				IncPC();
-				if (cpudebug) printf("%03X", dest);
+				if (cpudebug) fprintf(tracefile, "%04X", dest);
 			}
 			break;
 		case 0b01011000:
-			if (cpudebug) printf("JFP ");
+			if (cpudebug) fprintf(tracefile, "JFP ");
 			if (!f_parity)
 			{
 				Jump();
@@ -1268,16 +1483,16 @@ void RunCpu()
 			else
 			{
 				IncPC();
-				imm = mem[stack[r_sp]];
+				imm = ReadMem(pc); //mem[stack[r_sp]];
 				IncPC();
-				dest = (mem[stack[r_sp]] << 8) + imm;
+				dest = (ReadMem(pc) << 8) + imm; //(mem[stack[r_sp]] << 8) + imm;
 				IncPC();
-				if (cpudebug) printf("%03X", dest);
+				if (cpudebug) fprintf(tracefile, "%04X", dest);
 			}
 			break;
 		//JTc
 		case 0b01100000:
-			if (cpudebug) printf("JTC ");
+			if (cpudebug) fprintf(tracefile, "JTC ");
 			if (f_carry)
 			{
 				Jump();
@@ -1285,15 +1500,15 @@ void RunCpu()
 			else
 			{
 				IncPC();
-				imm = mem[stack[r_sp]];
+				imm = ReadMem(pc); //mem[stack[r_sp]];
 				IncPC();
-				dest = (mem[stack[r_sp]] << 8) + imm;
+				dest = (ReadMem(pc) << 8) + imm; //(mem[stack[r_sp]] << 8) + imm;
 				IncPC();
-				if (cpudebug) printf("%03X", dest);
+				if (cpudebug) fprintf(tracefile, "%04X", dest);
 			}
 			break;
 		case 0b01101000:
-			if (cpudebug) printf("JTZ ");
+			if (cpudebug) fprintf(tracefile, "JTZ ");
 			if (f_zero)
 			{
 				Jump();
@@ -1301,15 +1516,15 @@ void RunCpu()
 			else
 			{
 				IncPC();
-				imm = mem[stack[r_sp]];
+				imm = ReadMem(pc); //mem[stack[r_sp]];
 				IncPC();
-				dest = (mem[stack[r_sp]] << 8) + imm;
+				dest = (ReadMem(pc) << 8) + imm; //(mem[stack[r_sp]] << 8) + imm;
 				IncPC();
-				if (cpudebug) printf("%03X", dest);
+				if (cpudebug) fprintf(tracefile, "%04X", dest);
 			}
 			break;
 		case 0b01110000:
-			if (cpudebug) printf("JTS ");
+			if (cpudebug) fprintf(tracefile, "JTS ");
 			if (f_sign)
 			{
 				Jump();
@@ -1317,15 +1532,15 @@ void RunCpu()
 			else
 			{
 				IncPC();
-				imm = mem[stack[r_sp]];
+				imm = ReadMem(pc); //mem[stack[r_sp]];
 				IncPC();
-				dest = (mem[stack[r_sp]] << 8) + imm;
+				dest = (ReadMem(pc) << 8) + imm; //(mem[stack[r_sp]] << 8) + imm;
 				IncPC();
-				if (cpudebug) printf("%03X", dest);
+				if (cpudebug) fprintf(tracefile, "%04X", dest);
 			}
 			break;
 		case 0b01111000:
-			if (cpudebug) printf("JTP ");
+			if (cpudebug) fprintf(tracefile, "JTP ");
 			if (f_parity)
 			{
 				Jump();
@@ -1333,11 +1548,11 @@ void RunCpu()
 			else
 			{
 				IncPC();
-				imm = mem[stack[r_sp]];
+				imm = ReadMem(pc); //mem[stack[r_sp]];
 				IncPC();
-				dest = (mem[stack[r_sp]] << 8) + imm;
+				dest = (ReadMem(pc) << 8) + imm; //(mem[stack[r_sp]] << 8) + imm;
 				IncPC();
-				if (cpudebug) printf("%03X", dest);
+				if (cpudebug) fprintf(tracefile, "%04X", dest);
 			}
 			break;
 
@@ -1350,13 +1565,13 @@ void RunCpu()
 		case 0b01101110:
 		case 0b01110110:
 		case 0b01111110:
-			if (cpudebug) printf("CAL ");
+			if (cpudebug) fprintf(tracefile, "CAL ");
 			Call();
 			break;
 
 		//CFc
 		case 0b01000010:
-			if (cpudebug) printf("CFC ");
+			if (cpudebug) fprintf(tracefile, "CFC ");
 			if (!f_carry)
 			{
 				Call();
@@ -1364,15 +1579,15 @@ void RunCpu()
 			else
 			{
 				IncPC();
-				imm = mem[stack[r_sp]];
+				imm = ReadMem(pc); //mem[stack[r_sp]];
 				IncPC();
-				dest = (mem[stack[r_sp]] << 8) + imm;
+				dest = (ReadMem(pc) << 8) + imm; //(mem[stack[r_sp]] << 8) + imm;
 				IncPC();
-				if (cpudebug) printf("%03X", dest);
+				if (cpudebug) fprintf(tracefile, "%04X", dest);
 			}
 			break;
 		case 0b01001010:
-			if (cpudebug) printf("CFZ ");
+			if (cpudebug) fprintf(tracefile, "CFZ ");
 			if (!f_zero)
 			{
 				Call();
@@ -1380,15 +1595,15 @@ void RunCpu()
 			else
 			{
 				IncPC();
-				imm = mem[stack[r_sp]];
+				imm = ReadMem(pc); //mem[stack[r_sp]];
 				IncPC();
-				dest = (mem[stack[r_sp]] << 8) + imm;
+				dest = (ReadMem(pc) << 8) + imm; //(mem[stack[r_sp]] << 8) + imm;
 				IncPC();
-				if (cpudebug) printf("%03X", dest);
+				if (cpudebug) fprintf(tracefile, "%04X", dest);
 			}
 			break;
 		case 0b01010010:
-			if (cpudebug) printf("CFS ");
+			if (cpudebug) fprintf(tracefile, "CFS ");
 			if (!f_sign)
 			{
 				Call();
@@ -1396,15 +1611,15 @@ void RunCpu()
 			else
 			{
 				IncPC();
-				imm = mem[stack[r_sp]];
+				imm = ReadMem(pc); //mem[stack[r_sp]];
 				IncPC();
-				dest = (mem[stack[r_sp]] << 8) + imm;
+				dest = (ReadMem(pc) << 8) + imm; //(mem[stack[r_sp]] << 8) + imm;
 				IncPC();
-				if (cpudebug) printf("%03X", dest);
+				if (cpudebug) fprintf(tracefile, "%04X", dest);
 			}
 			break;
 		case 0b01011010:
-			if (cpudebug) printf("CFP ");
+			if (cpudebug) fprintf(tracefile, "CFP ");
 			if (!f_parity)
 			{
 				Call();
@@ -1412,17 +1627,17 @@ void RunCpu()
 			else
 			{
 				IncPC();
-				imm = mem[stack[r_sp]];
+				imm = ReadMem(pc); //mem[stack[r_sp]];
 				IncPC();
-				dest = (mem[stack[r_sp]] << 8) + imm;
+				dest = (ReadMem(pc) << 8) + imm; //(mem[stack[r_sp]] << 8) + imm;
 				IncPC();
-				if (cpudebug) printf("%03X", dest);
+				if (cpudebug) fprintf(tracefile, "%04X", dest);
 			}
 			break;
 
 		//CTc
 		case 0b01100010:
-			if (cpudebug) printf("CTC ");
+			if (cpudebug) fprintf(tracefile, "CTC ");
 			if (f_carry)
 			{
 				Call();
@@ -1430,15 +1645,15 @@ void RunCpu()
 			else
 			{
 				IncPC();
-				imm = mem[stack[r_sp]];
+				imm = ReadMem(pc); //mem[stack[r_sp]];
 				IncPC();
-				dest = (mem[stack[r_sp]] << 8) + imm;
+				dest = (ReadMem(pc) << 8) + imm; //(mem[stack[r_sp]] << 8) + imm;
 				IncPC();
-				if (cpudebug) printf("%03X", dest);
+				if (cpudebug) fprintf(tracefile, "%04X", dest);
 			}
 			break;
 		case 0b01101010:
-			if (cpudebug) printf("CTZ ");
+			if (cpudebug) fprintf(tracefile, "CTZ ");
 			if (f_zero)
 			{
 				Call();
@@ -1446,15 +1661,15 @@ void RunCpu()
 			else
 			{
 				IncPC();
-				imm = mem[stack[r_sp]];
+				imm = ReadMem(pc); //mem[stack[r_sp]];
 				IncPC();
-				dest = (mem[stack[r_sp]] << 8) + imm;
+				dest = (ReadMem(pc) << 8) + imm; //(mem[stack[r_sp]] << 8) + imm;
 				IncPC();
-				if (cpudebug) printf("%03X", dest);
+				if (cpudebug) fprintf(tracefile, "%04X", dest);
 			}
 			break;
 		case 0b01110010:
-			if (cpudebug) printf("CTS ");
+			if (cpudebug) fprintf(tracefile, "CTS ");
 			if (f_sign)
 			{
 				Call();
@@ -1462,15 +1677,15 @@ void RunCpu()
 			else
 			{
 				IncPC();
-				imm = mem[stack[r_sp]];
+				imm = ReadMem(pc); //mem[stack[r_sp]];
 				IncPC();
-				dest = (mem[stack[r_sp]] << 8) + imm;
+				dest = (ReadMem(pc) << 8) + imm; //(mem[stack[r_sp]] << 8) + imm;
 				IncPC();
-				if (cpudebug) printf("%03X", dest);
+				if (cpudebug) fprintf(tracefile, "%04X", dest);
 			}
 			break;
 		case 0b01111010:
-			if (cpudebug) printf("CTP ");
+			if (cpudebug) fprintf(tracefile, "CTP ");
 			if (f_parity)
 			{
 				Call();
@@ -1478,11 +1693,11 @@ void RunCpu()
 			else
 			{
 				IncPC();
-				imm = mem[stack[r_sp]];
+				imm = ReadMem(pc); //mem[stack[r_sp]];
 				IncPC();
-				dest = (mem[stack[r_sp]] << 8) + imm;
+				dest = (ReadMem(pc) << 8) + imm; //(mem[stack[r_sp]] << 8) + imm;
 				IncPC();
-				if (cpudebug) printf("%03X", dest);
+				if (cpudebug) fprintf(tracefile, "%04X", dest);
 			}
 			break;
 
@@ -1495,86 +1710,93 @@ void RunCpu()
 		case 0b00101111:
 		case 0b00110111:
 		case 0b00111111:
-			DecSP();
-			if (cpudebug) printf("RET");
+			//DecSP();
+			pc = Pop();
+			if (cpudebug) fprintf(tracefile, "RET");
 			break;
 
 		//RFc
 		case 0b00000011:
 			if (!f_carry)
 			{
-				DecSP();
+				//DecSP();
+				pc = Pop();
 			}
 			else
 			{
 				IncPC();
 			}
-			if (cpudebug) printf("RFC");
+			if (cpudebug) fprintf(tracefile, "RFC");
 			break;
 		case 0b00001011:
 			if (!f_zero)
 			{
-				DecSP();
+				//DecSP();
+				pc = Pop();
 			}
 			else
 			{
 				IncPC();
 			}
-			if (cpudebug) printf("RFZ");
+			if (cpudebug) fprintf(tracefile, "RFZ");
 			break;
 		case 0b00010011:
-			if (!f_sign) DecSP();
-			if (cpudebug) printf("RFS");
+			if (!f_sign) pc = Pop(); //DecSP();
+			if (cpudebug) fprintf(tracefile, "RFS");
 			break;
 		case 0b00011011:
-			if (!f_parity) DecSP();
-			if (cpudebug) printf("RFP");
+			if (!f_parity) pc = Pop(); //DecSP();
+			if (cpudebug) fprintf(tracefile, "RFP");
 			break;
 
 		//RTc
 		case 0b00100011:
 			if (f_carry)
 			{
-				DecSP();
+				//DecSP();
+				pc = Pop();
 			}
 			else
 			{
 				IncPC();
 			}
-			if(cpudebug) printf("RTC");
+			if(cpudebug) fprintf(tracefile, "RTC");
 			break;
 		case 0b00101011:
 			if (f_zero)
 			{
-				DecSP();
+				//DecSP();
+				pc = Pop();
 			}
 			else
 			{
 				IncPC();
 			}
-			if (cpudebug) printf("RTZ");
+			if (cpudebug) fprintf(tracefile, "RTZ");
 			break;
 		case 0b00110011:
 			if (f_sign)
 			{
-				DecSP();
+				//DecSP();
+				pc = Pop();
 			}
 			else
 			{
 				IncPC();
 			}
-			if (cpudebug) printf("RTS");
+			if (cpudebug) fprintf(tracefile, "RTS");
 			break;
 		case 0b00111011:
 			if (f_parity)
 			{
-				DecSP();
+				//DecSP();
+				pc = Pop();
 			}
 			else
 			{
 				IncPC();
 			}
-			if (cpudebug) printf("RTP");
+			if (cpudebug) fprintf(tracefile, "RTP");
 			break;
 
 		//RST
@@ -1588,8 +1810,9 @@ void RunCpu()
 		case 0b00111101:
 			IncPC();
 			IncSP();
-			stack[r_sp] = instruction & 0b00111000;
-			if (cpudebug) printf("RST %03X", (instruction & 0b00111000));
+			//stack[r_sp] = instruction & 0b00111000;
+			Push(instruction & 0b00111000);
+			if (cpudebug) fprintf(tracefile, "RST %03X", (instruction & 0b00111000));
 			break;
 
 		//INP/OUTP
@@ -1633,19 +1856,21 @@ void RunCpu()
 		case 0b00000000:
 		case 0b00000001:
 		case 0b11111111:
-			printf("\r\n---HLT AT %03X---\r\n", stack[r_sp]);
+			fprintf(tracefile, "\r\n---HLT AT %04X---\r\n", pc);
 			f_halt = true;
 			IncPC();
 			break;
 
 		//invalid/unknown, skip
 		default:
-			printf("invalid instruction: %03o\r\n", instruction);
+			fprintf(tracefile, "invalid instruction: %03o\r\n", instruction);
 			IncPC();
 			break;
 	}
 
-	if (cpudebug) printf("\r\n\r\n");
+	if (cpudebug) fprintf(tracefile, "\r\n\r\n");
+
+	fclose(tracefile);
 }
 
 int statecount = 0;
@@ -1733,7 +1958,7 @@ SDL_AppResult SDL_AppIterate(void* appstate)
 		reentry = true;
 
 		newtime = SDL_GetTicks();
-		timediff = (newtime - lasttime) * 700;
+		timediff = (newtime - lasttime) * (cpudebug ? 1 : 700);
 		lasttime = newtime;
 		
 		for (int i = 0; i < timediff; i++)
